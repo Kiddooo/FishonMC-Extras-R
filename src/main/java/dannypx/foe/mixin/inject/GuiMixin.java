@@ -3,6 +3,7 @@ package dannypx.foe.mixin.inject;
 import dannypx.foe.handler.fetch.TitleHandler;
 import dannypx.foe.handler.logic.ConnectionHandler;
 import dannypx.foe.handler.logic.LoadingHandler;
+import dannypx.foe.handler.logic.XpHandler;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.gui.Gui;
 import net.minecraft.client.gui.GuiGraphics;
@@ -60,6 +61,13 @@ public abstract class GuiMixin {
                 && Configs.mixinConfig.guiMixinRenderItemHotbar.get()
         ) {
             ci.cancel();
+        }
+    }
+
+    @Inject(method = "setOverlayMessage", at = @At("HEAD"))
+    private void foer$captureXp(Component message, boolean tinted, CallbackInfo ci) {
+        if (ConnectionHandler.instance().isOnServer() & Configs.mainConfig.enableMod.get()) {
+            XpHandler.instance().onOverlay(message);
         }
     }
 }

@@ -1113,6 +1113,23 @@ public class PlaceholderRegistry {
                 .param("should_hide", DocTypeKind.BOOLEAN)
         );
         //endregion
+
+        //region XP
+        register(node("xp").branch(node("last")
+                        .branch(node("player").valueNumber(XpHandler.instance()::getLastPlayer)
+                                .description("Returns the latest player fishing XP award."))
+
+                        .branch(node("location").valueNumber(XpHandler.instance()::getLastLocation)
+                                .description("Returns the latest location XP award."))
+
+                        .branch(node("crew").valueNumber(XpHandler.instance()::getLastCrew)
+                                .description("Returns the latest crew XP award."))
+
+                        .branch(node("pet").valueNumber(XpHandler.instance()::getLastPet)
+                                .description("Returns the latest pet XP award."))
+                )
+        );
+        //endregion
     }
 
     public static void register(PlaceholderTreeNode root) {

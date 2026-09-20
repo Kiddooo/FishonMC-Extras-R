@@ -42,6 +42,10 @@ public class EventHandler extends Handler {
         this.sendEventTrigger(EventTrigger.ON_CATCH);
     }
 
+    public void onXpGain() {
+        this.sendEventTrigger(EventTrigger.ON_XP_GAIN);
+    }
+
     public void onCrewJoin() {
         this.sendEventTrigger(EventTrigger.ON_CREW_JOIN);
     }

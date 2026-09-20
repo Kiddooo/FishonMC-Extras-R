@@ -12,5 +12,6 @@ public enum EventTrigger {
     ON_SCREEN_CLOSE,
     ON_PET_EQUIP,
     ON_PET_UNEQUIP,
-    DEFAULT
+    DEFAULT,
+    ON_XP_GAIN
 }
