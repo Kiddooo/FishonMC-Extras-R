@@ -39,6 +39,8 @@
     "inject.LevelRendererBrightnessGetterMixin",
     "inject.LocatorBarMixin",
     "inject.PlayerTabOverlayMixin",
-    "inject.RecipeBookWidgetMixin"
+    "inject.RecipeBookWidgetMixin",
+    "inject.LocationXpMinecraftMixin",
+    "inject.LocationXpSoundManagerMixin"
   ]
 }

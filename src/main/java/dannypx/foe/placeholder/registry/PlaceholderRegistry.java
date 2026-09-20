@@ -13,7 +13,9 @@ import dannypx.foe.item.TagObject;
 import dannypx.foe.item.ValidateItem;
 import dannypx.foe.placeholder.evaluator.PlaceholderEvaluationException;
 import dannypx.foe.placeholder.functions.PlaceholderValue;
-import dannypx.foe.type.custom_value.*;
+import dannypx.foe.type.custom_value.BooleanValue;
+import dannypx.foe.type.custom_value.ItemStackValue;
+import dannypx.foe.type.custom_value.NumberValue;
 import dannypx.foe.type.tuple.Pair;
 import net.minecraft.client.Minecraft;
 import net.minecraft.nbt.CompoundTag;
@@ -1130,6 +1132,17 @@ public class PlaceholderRegistry {
                 )
         );
         //endregion
+
+        //region Location XP
+        register(node("location_xp")
+                .branch(node("name").valueString(LocationXpHandler.instance()::getLocation).description("Returns the current fishing location."))
+                .branch(node("available").valueBoolean(LocationXpHandler.instance()::isAvailable).description("Returns whether the current location XP has been retrieved."))
+                .branch(node("level").valueNumber(LocationXpHandler.instance()::getLevel).description("Returns the current location level."))
+                .branch(node("current").valueNumber(LocationXpHandler.instance()::getCurrentXp).description("Returns approximate current location XP."))
+                .branch(node("required").valueNumber(LocationXpHandler.instance()::getRequiredXp).description("Returns approximate XP required for the next location level."))
+                .branch(node("percent").valueNumber(LocationXpHandler.instance()::getProgressPercent).description("Returns approximate location-level progress as a percentage."))
+        );
+        //endregion
     }
 
     public static void register(PlaceholderTreeNode root) {
@@ -1141,6 +1154,274 @@ public class PlaceholderRegistry {
     }
 
     //region Placeholder Contexts
+
+    //region JSON Schema
+    public static JsonObject toJsonSchema() {
+        JsonObject root = new JsonObject();
+
+        for (Map.Entry<String, PlaceholderTreeNode> entry : ROOTS.entrySet()) {
+            root.add(entry.getKey(), describeNode(entry.getKey(), entry.getValue()));
+        }
+
+        return root;
+    }
+
+    public static String toJsonSchemaString() {
+        Gson gson = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
+        return gson.toJson(toJsonSchema());
+    }
+
+    public static JsonObject toJsonPathList() {
+        JsonObject root = new JsonObject();
+
+        for (Map.Entry<String, PlaceholderTreeNode> entry : ROOTS.entrySet()) {
+            JsonArray paths = new JsonArray();
+            collectPaths(entry.getKey(), entry.getValue(), paths);
+            root.add(entry.getKey(), paths);
+        }
+
+        return root;
+    }
+
+    public static String toJsonPathListString() {
+        Gson gson = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
+        return gson.toJson(toJsonPathList());
+    }
+
+    public static void collectPaths(String path, PlaceholderTreeNode node, JsonArray out) {
+        if (node.getValueKind() != ValueKind.NONE) out.add(path);
+        if (node.getEvalKind() != EvalKind.NONE) out.add(path + ".()");
+
+        for (Map.Entry<String, PlaceholderTreeNode> child : node.getChildren().entrySet()) {
+            collectPaths(path + "." + child.getKey(), child.getValue(), out);
+        }
+
+        if (node.getIndexChild() != null) collectPaths(path + ".<index>", node.getIndexChild(), out);
+        if (node.getStringChild() != null) collectPaths(path + ".<string>", node.getStringChild(), out);
+        if (node.getStringArrayChild() != null) collectPaths(path + ".<string[]>", node.getStringArrayChild(), out);
+    }
+
+    private static JsonElement describeNode(String name, PlaceholderTreeNode node) {
+        boolean hasChildren = !node.getChildren().isEmpty()
+                || node.getIndexChild() != null
+                || node.getStringChild() != null
+                || node.getStringArrayChild() != null;
+        boolean hasOwnValue = node.getValueKind() != ValueKind.NONE;
+        boolean hasOwnFunction = node.getEvalKind() != EvalKind.NONE;
+
+        if (!hasChildren) {
+            if (hasOwnValue && hasOwnFunction) return selfDescriptor(name, node);
+            if (hasOwnValue) return describeValueLeaf(node);
+            if (hasOwnFunction) return describeFunctionLeaf(name, node);
+
+            return new JsonPrimitive("unknown");
+        }
+
+        JsonObject object = new JsonObject();
+        if (hasOwnValue && hasOwnFunction) {
+            object.add("$self", selfDescriptor(name, node));
+        } else if (hasOwnValue) {
+            object.add("$self", describeValueLeaf(node));
+        } else if (hasOwnFunction) {
+            object.add("$self", describeFunctionLeaf(name, node));
+        }
+
+        for (Map.Entry<String, PlaceholderTreeNode> child : node.getChildren().entrySet()) {
+            object.add(child.getKey(), describeNode(child.getKey(), child.getValue()));
+        }
+        if (node.getIndexChild() != null) {
+            object.add("<index>", describeNode("<index>", node.getIndexChild()));
+        }
+        if (node.getStringChild() != null) {
+            object.add("<string>", describeNode("<string>", node.getStringChild()));
+        }
+        if (node.getStringArrayChild() != null) {
+            object.add("<string[]>", describeNode("<string[]>", node.getStringArrayChild()));
+        }
+        return object;
+    }
+
+    private static JsonObject selfDescriptor(String name, PlaceholderTreeNode node) {
+        JsonObject self = new JsonObject();
+        self.add("value", describeValueLeaf(node));
+        self.add("function", describeFunctionLeaf(name, node));
+        return self;
+    }
+
+    private static JsonElement describeValueLeaf(PlaceholderTreeNode node) {
+        String tag = valueTag(node.getValueKind());
+
+        JsonObject obj = new JsonObject();
+        obj.addProperty("returns", tag);
+        if (node.getDescription() != null) {
+            obj.addProperty("description", node.getDescription());
+        }
+        if (node.allowsEmpty()) {
+            obj.addProperty("allow_empty", true);
+        }
+        return obj;
+    }
+
+    private static JsonObject describeFunctionLeaf(String name, PlaceholderTreeNode node) {
+        String returnTag = evalTag(node.getEvalKind());
+        List<Param> params = node.getParams();
+
+        JsonObject obj = new JsonObject();
+        if (params.isEmpty()) {
+            obj.addProperty("signature", name + ".(value): " + returnTag);
+            obj.addProperty("returns", returnTag);
+            if (node.getDescription() != null) {
+                obj.addProperty("description", node.getDescription());
+            }
+            if (node.allowsEmpty()) {
+                obj.addProperty("allow_empty", true);
+            }
+            return obj;
+        }
+
+        StringBuilder signature = new StringBuilder(name).append(".(");
+        JsonArray paramsArray = new JsonArray();
+        for (int i = 0; i < params.size(); i++) {
+            Param param = params.get(i);
+            if (i > 0) signature.append(", ");
+            if (param.variadic()) signature.append("...");
+            signature.append(param.name());
+            if (param.optional()) signature.append("?");
+            signature.append(": ").append(param.getType());
+
+            JsonObject paramObj = new JsonObject();
+            paramObj.addProperty("name", param.name());
+            paramObj.addProperty("type", param.getType());
+            if (param.optional()) paramObj.addProperty("optional", true);
+            if (param.variadic()) paramObj.addProperty("variadic", true);
+            paramsArray.add(paramObj);
+        }
+        signature.append("): ").append(returnTag);
+
+        obj.addProperty("signature", signature.toString());
+        obj.addProperty("returns", returnTag);
+        if (node.getDescription() != null) {
+            obj.addProperty("description", node.getDescription());
+        }
+        if (node.allowsEmpty()) {
+            obj.addProperty("allow_empty", true);
+        }
+        obj.add("params", paramsArray);
+        return obj;
+    }
+
+    private static String valueTag(ValueKind valueKind) {
+        return switch (valueKind) {
+            case NONE -> "none";
+            case STRING -> "string";
+            case COMPONENT -> "component";
+            case NUMBER -> "number";
+            case BOOLEAN -> "boolean";
+            case VALUE -> "dynamic";
+        };
+    }
+
+    private static String evalTag(EvalKind evalKind) {
+        return switch (evalKind) {
+            case NONE -> "none";
+            case STRING -> "string";
+            case COMPONENT -> "component";
+            case NUMBER -> "number";
+            case BOOLEAN -> "boolean";
+            case VALUE -> "dynamic";
+        };
+    }
+
+    //region Helpers
+    private static MutableComponent getLoreValue(ItemStack itemStack, String indexString) {
+        Pair<Boolean, TagObject> item = ValidateItem.isServerItem(itemStack, false);
+        return item.value1() ? getLoreValue(item.value2(), indexString) : Component.empty();
+    }
+
+    private static MutableComponent getLoreValue(TagObject object, String indexString) {
+        try {
+            int index = Integer.parseInt(indexString);
+            List<Component> loreLines = object.getLore();
+
+            if (index >= 0 && index < loreLines.size()) {
+                return loreLines.get(index).copy();
+            }
+
+            return Component.empty();
+        } catch (NumberFormatException e) {
+            return Component.empty();
+        }
+    }
+
+    public static PlaceholderValue getNbtValue(ItemStack itemStack, List<String> indices) {
+        Pair<Boolean, TagObject> item = ValidateItem.isServerItem(itemStack, true);
+        return item.value1() ? getNbtValue(item.value2(), indices) : PlaceholderValue.emptyText();
+    }
+
+    public static PlaceholderValue getNbtValue(TagObject object, List<String> indices) {
+        if (object.contains(indices.getFirst())) {
+            Tag data = object.get(indices.getFirst());
+            return switch (data.getId()) {
+                case 1 -> PlaceholderValue.bool(object.getBoolean(indices.getFirst()));
+                case 2 -> PlaceholderValue.number(object.getShort(indices.getFirst()));
+                case 3 -> PlaceholderValue.number(object.getInt(indices.getFirst()));
+                case 4 -> PlaceholderValue.number(object.getLong(indices.getFirst()));
+                case 5 -> PlaceholderValue.number(object.getFloat(indices.getFirst()));
+                case 6 -> PlaceholderValue.number(object.getDouble(indices.getFirst()));
+                case 7 -> {
+                    if (indices.size() > 1) {
+                        try {
+                            int index = Integer.parseInt(indices.get(1));
+                            yield PlaceholderValue.number(object.getByteFromArray(indices.getFirst(), index));
+                        } catch (NumberFormatException e) {
+                            yield PlaceholderValue.emptyText();
+                        }
+                    }
+                    yield PlaceholderValue.emptyText();
+                }
+                case 8 -> PlaceholderValue.text(object.getString(indices.getFirst()));
+                case 9 -> {
+                    if (indices.size() > 2) {
+                        try {
+                            int index = Integer.parseInt(indices.get(1));
+                            yield getNbtValue(TagObject.of(object.getList(indices.getFirst()).getCompound(index).orElse(new CompoundTag())),
+                                    indices.subList(2, indices.size())
+                            );
+                        } catch (NumberFormatException e) {
+                            yield PlaceholderValue.emptyText();
+                        }
+                    }
+                    yield PlaceholderValue.emptyText();
+                }
+                case 10 ->
+                        getNbtValue(TagObject.of(object.getTag(indices.getFirst())), indices.subList(1, indices.size()));
+                case 11 -> {
+                    if (indices.size() > 1) {
+                        try {
+                            int index = Integer.parseInt(indices.get(1));
+                            yield PlaceholderValue.number(object.getIntFromArray(indices.getFirst(), index));
+                        } catch (NumberFormatException e) {
+                            yield PlaceholderValue.emptyText();
+                        }
+                    }
+                    yield PlaceholderValue.emptyText();
+                }
+                case 12 -> {
+                    if (indices.size() > 1) {
+                        try {
+                            int index = Integer.parseInt(indices.get(1));
+                            yield PlaceholderValue.number(object.getLongFromArray(indices.getFirst(), index));
+                        } catch (NumberFormatException e) {
+                            yield PlaceholderValue.emptyText();
+                        }
+                    }
+                    yield PlaceholderValue.emptyText();
+                }
+                default -> PlaceholderValue.emptyText();
+            };
+        }
+        return PlaceholderValue.emptyText();
+    }
 
     static class BossEventContext {
         static MutableComponent getLocation() {
@@ -1302,7 +1583,7 @@ public class PlaceholderRegistry {
         static MutableComponent getFishingRodLineName() {
             List<TagObject> lineList = InventoryHandler.instance().getCurrentFishingRod().getLineItem();
 
-            if(!lineList.isEmpty()) {
+            if (!lineList.isEmpty()) {
                 return lineList.getFirst().getName().copy();
             }
 
@@ -1312,7 +1593,7 @@ public class PlaceholderRegistry {
         static MutableComponent getFishingRodLineLore(List<String> indices) {
             List<TagObject> lineList = InventoryHandler.instance().getCurrentFishingRod().getLineItem();
 
-            if(!lineList.isEmpty()) {
+            if (!lineList.isEmpty()) {
                 return getLoreValue(lineList.getFirst(), indices.getFirst());
             }
 
@@ -1322,7 +1603,7 @@ public class PlaceholderRegistry {
         static PlaceholderValue getFishingRodLineNbt(List<String> indices) {
             List<TagObject> lineList = InventoryHandler.instance().getCurrentFishingRod().getLineItem();
 
-            if(!lineList.isEmpty()) {
+            if (!lineList.isEmpty()) {
                 return getNbtValue(lineList.getFirst(), indices);
             }
 
@@ -1332,7 +1613,7 @@ public class PlaceholderRegistry {
         static MutableComponent getFishingRodReelName() {
             List<TagObject> reelList = InventoryHandler.instance().getCurrentFishingRod().getReelItem();
 
-            if(!reelList.isEmpty()) {
+            if (!reelList.isEmpty()) {
                 return reelList.getFirst().getName().copy();
             }
 
@@ -1342,7 +1623,7 @@ public class PlaceholderRegistry {
         static MutableComponent getFishingRodReelLore(List<String> indices) {
             List<TagObject> reelList = InventoryHandler.instance().getCurrentFishingRod().getReelItem();
 
-            if(!reelList.isEmpty()) {
+            if (!reelList.isEmpty()) {
                 return getLoreValue(reelList.getFirst(), indices.getFirst());
             }
 
@@ -1352,7 +1633,7 @@ public class PlaceholderRegistry {
         static PlaceholderValue getFishingRodReelNbt(List<String> indices) {
             List<TagObject> reelList = InventoryHandler.instance().getCurrentFishingRod().getReelItem();
 
-            if(!reelList.isEmpty()) {
+            if (!reelList.isEmpty()) {
                 return getNbtValue(reelList.getFirst(), indices);
             }
 
@@ -1362,7 +1643,7 @@ public class PlaceholderRegistry {
         static MutableComponent getFishingRodPoleName() {
             List<TagObject> poleList = InventoryHandler.instance().getCurrentFishingRod().getPoleItem();
 
-            if(!poleList.isEmpty()) {
+            if (!poleList.isEmpty()) {
                 return poleList.getFirst().getName().copy();
             }
 
@@ -1372,7 +1653,7 @@ public class PlaceholderRegistry {
         static MutableComponent getFishingRodPoleLore(List<String> indices) {
             List<TagObject> poleList = InventoryHandler.instance().getCurrentFishingRod().getPoleItem();
 
-            if(!poleList.isEmpty()) {
+            if (!poleList.isEmpty()) {
                 return getLoreValue(poleList.getFirst(), indices.getFirst());
             }
 
@@ -1382,7 +1663,7 @@ public class PlaceholderRegistry {
         static PlaceholderValue getFishingRodPoleNbt(List<String> indices) {
             List<TagObject> poleList = InventoryHandler.instance().getCurrentFishingRod().getPoleItem();
 
-            if(!poleList.isEmpty()) {
+            if (!poleList.isEmpty()) {
                 return getNbtValue(poleList.getFirst(), indices);
             }
 
@@ -1516,7 +1797,7 @@ public class PlaceholderRegistry {
         static MutableComponent getSlotName(List<String> indices) {
             int index = Integer.parseInt(indices.getFirst());
 
-            if(index >= 0) {
+            if (index >= 0) {
                 ItemStack item = Minecraft.getInstance().player.getInventory().getItem(index);
                 return item.getHoverName().copy();
             }
@@ -1526,7 +1807,7 @@ public class PlaceholderRegistry {
         static MutableComponent getSlotLore(List<String> indices) {
             int index = Integer.parseInt(indices.getFirst());
 
-            if(index >= 0) {
+            if (index >= 0) {
                 ItemStack item = Minecraft.getInstance().player.getInventory().getItem(index);
                 return getLoreValue(item, indices.get(1));
             }
@@ -1534,10 +1815,10 @@ public class PlaceholderRegistry {
         }
 
         static PlaceholderValue getSlotNbt(List<String> indices) {
-            if(indices.size() > 1) {
+            if (indices.size() > 1) {
                 int index = Integer.parseInt(indices.getFirst());
 
-                if(index >= 0) {
+                if (index >= 0) {
                     ItemStack item = Minecraft.getInstance().player.getInventory().getItem(index);
                     return getNbtValue(item, indices.subList(1, indices.size()));
                 }
@@ -1555,6 +1836,7 @@ public class PlaceholderRegistry {
             return KeyBindHelper.getKeyString(Configs.keyBindConfig.inspectKeybind);
         }
     }
+    //endregion
 
     static class LoadingContext {
         static Boolean getIsLoadingDone() {
@@ -1565,6 +1847,7 @@ public class PlaceholderRegistry {
             return LoadingHandler.instance().isError();
         }
     }
+    //endregion
 
     static class HitResultContext {
         static MutableComponent getBlockName() {
@@ -1589,7 +1872,7 @@ public class PlaceholderRegistry {
     static class CrewContext {
         static String getOnlineName(List<String> indices) {
             int index = Integer.parseInt(indices.getFirst());
-            if(index >= 0 && index < CrewHandler.instance().getOnlineMembers().size()) {
+            if (index >= 0 && index < CrewHandler.instance().getOnlineMembers().size()) {
                 return CrewHandler.instance().getOnlineMembers().get(index).value2();
             }
             return "";
@@ -1597,7 +1880,7 @@ public class PlaceholderRegistry {
 
         static String getOnlineId(List<String> indices) {
             int index = Integer.parseInt(indices.getFirst());
-            if(index >= 0 && index < CrewHandler.instance().getOnlineMembers().size()) {
+            if (index >= 0 && index < CrewHandler.instance().getOnlineMembers().size()) {
                 return CrewHandler.instance().getOnlineMembers().get(index).value1().toString();
             }
             return "";
@@ -1605,7 +1888,7 @@ public class PlaceholderRegistry {
 
         static String getOfflineName(List<String> indices) {
             int index = Integer.parseInt(indices.getFirst());
-            if(index >= 0 && index < CrewHandler.instance().getOfflineMembers().size()) {
+            if (index >= 0 && index < CrewHandler.instance().getOfflineMembers().size()) {
                 return CrewHandler.instance().getOnlineMembers().get(index).value2();
             }
             return "";
@@ -1613,7 +1896,7 @@ public class PlaceholderRegistry {
 
         static String getOfflineId(List<String> indices) {
             int index = Integer.parseInt(indices.getFirst());
-            if(index >= 0 && index < CrewHandler.instance().getOfflineMembers().size()) {
+            if (index >= 0 && index < CrewHandler.instance().getOfflineMembers().size()) {
                 return CrewHandler.instance().getOnlineMembers().get(index).value1().toString();
             }
             return "";
@@ -1633,7 +1916,7 @@ public class PlaceholderRegistry {
     static class TimerContext {
         static Number getTimer(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer != null) {
+            if (timer != null) {
                 return timer.getTimer();
             }
             return null;
@@ -1641,7 +1924,7 @@ public class PlaceholderRegistry {
 
         static Number getOffset(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer != null) {
+            if (timer != null) {
                 return timer.getOffset();
             }
             return null;
@@ -1649,7 +1932,7 @@ public class PlaceholderRegistry {
 
         static String getNotificationToTrigger(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer != null) {
+            if (timer != null) {
                 return timer.getNotificationToTrigger();
             }
             return "";
@@ -1657,7 +1940,7 @@ public class PlaceholderRegistry {
 
         static String getCleanUpChatTrigger(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer != null) {
+            if (timer != null) {
                 return timer.getNotificationToTrigger();
             }
             return "";
@@ -1665,7 +1948,7 @@ public class PlaceholderRegistry {
 
         static Boolean getIsUseTimer(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer != null) {
+            if (timer != null) {
                 return timer.isUseTimer();
             }
             return false;
@@ -1673,7 +1956,7 @@ public class PlaceholderRegistry {
 
         static Boolean getIsPeriod(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer != null) {
+            if (timer != null) {
                 return timer.isPeriod();
             }
             return false;
@@ -1681,7 +1964,7 @@ public class PlaceholderRegistry {
 
         static Number getOffTimer(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
+            if (timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
                 return timerPeriod.getOffTimer();
             }
             return null;
@@ -1689,7 +1972,7 @@ public class PlaceholderRegistry {
 
         static String getNotificationToTriggerEnd(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
+            if (timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
                 return timerPeriod.getNotificationToTriggerEnd();
             }
             return "";
@@ -1697,7 +1980,7 @@ public class PlaceholderRegistry {
 
         static String getTimeSecond(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer != null) {
+            if (timer != null) {
                 long timeSeconds = System.currentTimeMillis() / 1000;
                 long adjusted = timeSeconds + timer.getOffset();
                 long pos = adjusted % timer.getTimer();
@@ -1710,7 +1993,7 @@ public class PlaceholderRegistry {
 
         static String getTimeMinute(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer != null) {
+            if (timer != null) {
                 long timeSeconds = System.currentTimeMillis() / 1000;
                 long adjusted = timeSeconds + timer.getOffset();
                 long pos = adjusted % timer.getTimer();
@@ -1723,7 +2006,7 @@ public class PlaceholderRegistry {
 
         static Number getTimeHour(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer != null) {
+            if (timer != null) {
                 long timeSeconds = System.currentTimeMillis() / 1000;
                 long adjusted = timeSeconds + timer.getOffset();
                 long pos = adjusted % timer.getTimer();
@@ -1736,7 +2019,7 @@ public class PlaceholderRegistry {
 
         static String getOnTimeSecond(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
+            if (timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
                 long cycle = timerPeriod.getTimer() + timerPeriod.getOffTimer();
                 long adjusted = System.currentTimeMillis() / 1000 + timerPeriod.getOffset();
                 long pos = adjusted % cycle;
@@ -1751,7 +2034,7 @@ public class PlaceholderRegistry {
 
         static String getOnTimeMinute(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
+            if (timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
                 long cycle = timerPeriod.getTimer() + timerPeriod.getOffTimer();
                 long adjusted = System.currentTimeMillis() / 1000 + timerPeriod.getOffset();
                 long pos = adjusted % cycle;
@@ -1766,7 +2049,7 @@ public class PlaceholderRegistry {
 
         static Number getOnTimeHour(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
+            if (timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
                 long cycle = timerPeriod.getTimer() + timerPeriod.getOffTimer();
                 long adjusted = System.currentTimeMillis() / 1000 + timerPeriod.getOffset();
                 long pos = adjusted % cycle;
@@ -1781,7 +2064,7 @@ public class PlaceholderRegistry {
 
         static String getOffTimeSecond(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
+            if (timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
                 long cycle = timerPeriod.getTimer() + timerPeriod.getOffTimer();
                 long adjusted = System.currentTimeMillis() / 1000 + timerPeriod.getOffset();
                 long pos = adjusted % cycle;
@@ -1794,7 +2077,7 @@ public class PlaceholderRegistry {
 
         static String getOffTimeMinute(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
+            if (timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
                 long cycle = timerPeriod.getTimer() + timerPeriod.getOffTimer();
                 long adjusted = System.currentTimeMillis() / 1000 + timerPeriod.getOffset();
                 long pos = adjusted % cycle;
@@ -1807,7 +2090,7 @@ public class PlaceholderRegistry {
 
         static Number getOffTimeHour(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
+            if (timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
                 long cycle = timerPeriod.getTimer() + timerPeriod.getOffTimer();
                 long adjusted = System.currentTimeMillis() / 1000 + timerPeriod.getOffset();
                 long pos = adjusted % cycle;
@@ -1820,7 +2103,7 @@ public class PlaceholderRegistry {
 
         static Boolean getIsOn(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
+            if (timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
                 long cycle = timerPeriod.getTimer() + timerPeriod.getOffTimer();
                 long adjusted = System.currentTimeMillis() / 1000 + timerPeriod.getOffset();
                 long pos = adjusted % cycle;
@@ -1832,7 +2115,7 @@ public class PlaceholderRegistry {
 
         static Boolean getIsOff(List<String> indices) {
             CustomTimerDataHandler.CustomTimer timer = TimerHandler.instance().getTimers().stream().filter(t -> Objects.equals(t.getName(), indices.getFirst())).findFirst().orElse(null);
-            if(timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
+            if (timer instanceof CustomTimerDataHandler.CustomTimerPeriod timerPeriod) {
                 long cycle = timerPeriod.getTimer() + timerPeriod.getOffTimer();
                 long adjusted = System.currentTimeMillis() / 1000 + timerPeriod.getOffset();
                 long pos = adjusted % cycle;
@@ -1845,42 +2128,42 @@ public class PlaceholderRegistry {
 
     static class CatchContext {
         static MutableComponent getLastCaughtFishName() {
-            if(!CatchingHandler.instance().getLastCaughtFish().getItemStack().isEmpty()) {
+            if (!CatchingHandler.instance().getLastCaughtFish().getItemStack().isEmpty()) {
                 return CatchingHandler.instance().getLastCaughtFish().getName().copy();
             }
             return Component.empty();
         }
 
         static String getLastCaughtFishRarityName() {
-            if(CatchingHandler.instance().getLastDataFish() != null) {
+            if (CatchingHandler.instance().getLastDataFish() != null) {
                 return CatchingHandler.instance().getLastDataFish().value1().value1();
             }
             return "";
         }
 
         static MutableComponent getLastCaughtFishRarityIcon() {
-            if(!CatchingHandler.instance().getLastCaughtFish().getItemStack().isEmpty()) {
+            if (!CatchingHandler.instance().getLastCaughtFish().getItemStack().isEmpty()) {
                 return CatchingHandler.instance().getLastCaughtFish().getRarityComponent().copy();
             }
             return Component.empty();
         }
 
         static Number getLastCaughtFishRarityDryStreak() {
-            if(CatchingHandler.instance().getLastDataFish() != null) {
+            if (CatchingHandler.instance().getLastDataFish() != null) {
                 return CatchingHandler.instance().getLastDataFish().value1().value2();
             }
             return null;
         }
 
         static String getLastCaughtFishVariantName() {
-            if(CatchingHandler.instance().getLastDataFish() != null) {
+            if (CatchingHandler.instance().getLastDataFish() != null) {
                 return CatchingHandler.instance().getLastDataFish().value2().value1();
             }
             return "";
         }
 
         static MutableComponent getLastCaughtFishVariantIcon() {
-            if(!CatchingHandler.instance().getLastCaughtFish().getItemStack().isEmpty()) {
+            if (!CatchingHandler.instance().getLastCaughtFish().getItemStack().isEmpty()) {
                 return CatchingHandler.instance().getLastCaughtFish().getVariantComponent().copy();
             }
             return Component.empty();
@@ -1888,7 +2171,7 @@ public class PlaceholderRegistry {
         }
 
         static Number getLastCaughtFishVariantDryStreak() {
-            if(CatchingHandler.instance().getLastDataFish() != null) {
+            if (CatchingHandler.instance().getLastDataFish() != null) {
                 return CatchingHandler.instance().getLastDataFish().value2().value2();
             }
             return null;
@@ -1896,21 +2179,21 @@ public class PlaceholderRegistry {
         }
 
         static String getLastCaughtFishSizeName() {
-            if(CatchingHandler.instance().getLastDataFish() != null) {
+            if (CatchingHandler.instance().getLastDataFish() != null) {
                 return CatchingHandler.instance().getLastDataFish().value3().value1();
             }
             return "";
         }
 
         static MutableComponent getLastCaughtFishSizeIcon() {
-            if(!CatchingHandler.instance().getLastCaughtFish().getItemStack().isEmpty()) {
+            if (!CatchingHandler.instance().getLastCaughtFish().getItemStack().isEmpty()) {
                 return CatchingHandler.instance().getLastCaughtFish().getFishSizeComponent().copy();
             }
             return Component.empty();
         }
 
         static Number getLastCaughtFishSizeDryStreak() {
-            if(CatchingHandler.instance().getLastDataFish() != null) {
+            if (CatchingHandler.instance().getLastDataFish() != null) {
                 return CatchingHandler.instance().getLastDataFish().value3().value2();
             }
             return null;
@@ -1955,49 +2238,49 @@ public class PlaceholderRegistry {
         }
 
         static MutableComponent getLastCaughtPetName() {
-            if(!CatchingHandler.instance().getLastCaughtPet().getItemStack().isEmpty()) {
+            if (!CatchingHandler.instance().getLastCaughtPet().getItemStack().isEmpty()) {
                 return CatchingHandler.instance().getLastCaughtPet().getName().copy();
             }
             return Component.empty();
         }
 
         static String getLastCaughtPetRarityName() {
-            if(CatchingHandler.instance().getLastDataPet() != null) {
+            if (CatchingHandler.instance().getLastDataPet() != null) {
                 return CatchingHandler.instance().getLastDataPet().value1().value1();
             }
             return "";
         }
 
         static MutableComponent getLastCaughtPetRarityIcon() {
-            if(!CatchingHandler.instance().getLastCaughtPet().getItemStack().isEmpty()) {
+            if (!CatchingHandler.instance().getLastCaughtPet().getItemStack().isEmpty()) {
                 return CatchingHandler.instance().getLastCaughtPet().getRarityComponent().copy();
             }
             return Component.empty();
         }
 
         static Number getLastCaughtPetRarityDryStreak() {
-            if(CatchingHandler.instance().getLastDataPet() != null) {
+            if (CatchingHandler.instance().getLastDataPet() != null) {
                 return CatchingHandler.instance().getLastDataPet().value1().value2();
             }
             return null;
         }
 
         static String getLastCaughtPetRatingName() {
-            if(CatchingHandler.instance().getLastDataPet() != null) {
+            if (CatchingHandler.instance().getLastDataPet() != null) {
                 return CatchingHandler.instance().getLastDataPet().value2().value1();
             }
             return "";
         }
 
         static MutableComponent getLastCaughtPetRatingIcon() {
-            if(!CatchingHandler.instance().getLastCaughtPet().getItemStack().isEmpty()) {
+            if (!CatchingHandler.instance().getLastCaughtPet().getItemStack().isEmpty()) {
                 return CatchingHandler.instance().getLastCaughtPet().getRarityComponent().copy();
             }
             return Component.empty();
         }
 
         static Number getLastCaughtPetRatingDryStreak() {
-            if(CatchingHandler.instance().getLastDataPet() != null) {
+            if (CatchingHandler.instance().getLastDataPet() != null) {
                 return CatchingHandler.instance().getLastDataPet().value2().value2();
             }
             return null;
@@ -2158,7 +2441,8 @@ public class PlaceholderRegistry {
             String location = BossEventHandler.instance().getLocation().getString();
             List<QuestDataHandler.Quest> quests = QuestDataHandler.instance().getQuestData().questList.getOrDefault(location, List.of());
             int index = Integer.parseInt(indices.getFirst());
-            if(!quests.isEmpty() && index >= 0 && index < quests.size()) return ConstantDataHandler.instance().getConstantFishComponent(quests.get(index).goal).copy();
+            if (!quests.isEmpty() && index >= 0 && index < quests.size())
+                return ConstantDataHandler.instance().getConstantFishComponent(quests.get(index).goal).copy();
             return Component.empty();
         }
 
@@ -2166,7 +2450,7 @@ public class PlaceholderRegistry {
             String location = BossEventHandler.instance().getLocation().getString();
             List<QuestDataHandler.Quest> quests = QuestDataHandler.instance().getQuestData().questList.getOrDefault(location, List.of());
             int index = Integer.parseInt(indices.getFirst());
-            if(!quests.isEmpty() && index >= 0 && index < quests.size()) return quests.get(index).max;
+            if (!quests.isEmpty() && index >= 0 && index < quests.size()) return quests.get(index).max;
             return null;
         }
 
@@ -2174,7 +2458,7 @@ public class PlaceholderRegistry {
             String location = BossEventHandler.instance().getLocation().getString();
             List<QuestDataHandler.Quest> quests = QuestDataHandler.instance().getQuestData().questList.getOrDefault(location, List.of());
             int index = Integer.parseInt(indices.getFirst());
-            if(!quests.isEmpty() && index >= 0 && index < quests.size()) return quests.get(index).current;
+            if (!quests.isEmpty() && index >= 0 && index < quests.size()) return quests.get(index).current;
             return null;
         }
 
@@ -2182,11 +2466,12 @@ public class PlaceholderRegistry {
             String location = BossEventHandler.instance().getLocation().getString();
             List<QuestDataHandler.Quest> quests = QuestDataHandler.instance().getQuestData().questList.getOrDefault(location, List.of());
             int index = Integer.parseInt(indices.getFirst());
-            if(quests.isEmpty() || index >= quests.size()) return false;
-            if(index >= 0) return true;
+            if (quests.isEmpty() || index >= quests.size()) return false;
+            if (index >= 0) return true;
             return null;
         }
     }
+    //endregion
 
     static class StatsDataContext {
         static Number getFishTotal() {
@@ -2199,7 +2484,7 @@ public class PlaceholderRegistry {
 
         static Number getFishRarityDryStreak(List<String> indices) {
             Number caughtOn = StatsDataHandler.instance().getStatsData().fishData.getOrDefault(FishTagObject.RARITY, Map.of()).getOrDefault(indices.getFirst(), StatsDataHandler.Stat.of(null, null)).caughtOn();
-            if(caughtOn != null) return StatsDataHandler.instance().getStatsData().fishTotal - caughtOn.intValue();
+            if (caughtOn != null) return StatsDataHandler.instance().getStatsData().fishTotal - caughtOn.intValue();
             return null;
         }
 
@@ -2209,7 +2494,7 @@ public class PlaceholderRegistry {
 
         static Number getFishSizeDryStreak(List<String> indices) {
             Number caughtOn = StatsDataHandler.instance().getStatsData().fishData.getOrDefault(FishTagObject.FISH_SIZE, Map.of()).getOrDefault(indices.getFirst(), StatsDataHandler.Stat.of(null, null)).caughtOn();
-            if(caughtOn != null) return StatsDataHandler.instance().getStatsData().fishTotal - caughtOn.intValue();
+            if (caughtOn != null) return StatsDataHandler.instance().getStatsData().fishTotal - caughtOn.intValue();
             return null;
         }
 
@@ -2219,7 +2504,7 @@ public class PlaceholderRegistry {
 
         static Number getFishVariantDryStreak(List<String> indices) {
             Number caughtOn = StatsDataHandler.instance().getStatsData().fishData.getOrDefault(FishTagObject.VARIANT, Map.of()).getOrDefault(indices.getFirst(), StatsDataHandler.Stat.of(null, null)).caughtOn();
-            if(caughtOn != null) return StatsDataHandler.instance().getStatsData().fishTotal - caughtOn.intValue();
+            if (caughtOn != null) return StatsDataHandler.instance().getStatsData().fishTotal - caughtOn.intValue();
             return null;
         }
 
@@ -2237,7 +2522,7 @@ public class PlaceholderRegistry {
 
         static Number getPetRarityDryStreak(List<String> indices) {
             Number caughtOn = StatsDataHandler.instance().getStatsData().petData.getOrDefault(PetTagObject.RARITY, Map.of()).getOrDefault(indices.getFirst(), StatsDataHandler.Stat.of(null, null)).caughtOn();
-            if(caughtOn != null) return StatsDataHandler.instance().getStatsData().fishTotal - caughtOn.intValue();
+            if (caughtOn != null) return StatsDataHandler.instance().getStatsData().fishTotal - caughtOn.intValue();
             return null;
         }
 
@@ -2247,7 +2532,7 @@ public class PlaceholderRegistry {
 
         static Number getPetRatingDryStreak(List<String> indices) {
             Number caughtOn = StatsDataHandler.instance().getStatsData().petData.getOrDefault(PetTagObject.RATING, Map.of()).getOrDefault(TextHelper.smallCaps(indices.getFirst()), StatsDataHandler.Stat.of(null, null)).caughtOn();
-            if(caughtOn != null) return StatsDataHandler.instance().getStatsData().fishTotal - caughtOn.intValue();
+            if (caughtOn != null) return StatsDataHandler.instance().getStatsData().fishTotal - caughtOn.intValue();
             return null;
         }
 
@@ -2257,7 +2542,7 @@ public class PlaceholderRegistry {
 
         static Number getItemDryStreak(List<String> indices) {
             Number caughtOn = StatsDataHandler.instance().getStatsData().itemData.getOrDefault(indices.getFirst(), StatsDataHandler.Stat.of(null, null)).caughtOn();
-            if(caughtOn != null) return StatsDataHandler.instance().getStatsData().fishTotal - caughtOn.intValue();
+            if (caughtOn != null) return StatsDataHandler.instance().getStatsData().fishTotal - caughtOn.intValue();
             return null;
         }
     }
@@ -2277,10 +2562,11 @@ public class PlaceholderRegistry {
     static class TrackerDataContext {
         static PlaceholderValue getValue(List<String> indices) {
             CustomTrackerDataHandler.CustomTracker tracker = CustomTrackerDataHandler.instance().getCustomTrackerData().trackerList.getOrDefault(indices.getFirst(), null);
-            if(tracker != null) {
+            if (tracker != null) {
                 return switch (tracker.getValue()) {
                     case BooleanValue booleanValue -> PlaceholderValue.bool(booleanValue.value());
-                    case ItemStackValue itemStackValue -> PlaceholderValue.component(itemStackValue.value().value1().getHoverName().copy());
+                    case ItemStackValue itemStackValue ->
+                            PlaceholderValue.component(itemStackValue.value().value1().getHoverName().copy());
                     case NumberValue numberValue -> PlaceholderValue.number(numberValue.value());
                     default -> PlaceholderValue.emptyText();
                 };
@@ -2290,7 +2576,7 @@ public class PlaceholderRegistry {
 
         static MutableComponent getItemLore(List<String> indices) {
             CustomTrackerDataHandler.CustomTracker tracker = CustomTrackerDataHandler.instance().getCustomTrackerData().trackerList.getOrDefault(indices.getFirst(), null);
-            if(tracker != null) {
+            if (tracker != null) {
                 return switch (tracker.getValue()) {
                     case ItemStackValue itemStackValue -> getLoreValue(itemStackValue.value().value1(), indices.get(1));
                     default -> Component.empty();
@@ -2301,32 +2587,32 @@ public class PlaceholderRegistry {
 
         static PlaceholderValue getItemNbt(List<String> indices) {
             CustomTrackerDataHandler.CustomTracker tracker = CustomTrackerDataHandler.instance().getCustomTrackerData().trackerList.getOrDefault(indices.getFirst(), null);
-            if(tracker != null) {
+            if (tracker != null) {
                 return switch (tracker.getValue()) {
-                    case ItemStackValue itemStackValue -> getNbtValue(itemStackValue.value().value1(), indices.subList(1, indices.size()));
+                    case ItemStackValue itemStackValue ->
+                            getNbtValue(itemStackValue.value().value1(), indices.subList(1, indices.size()));
                     default -> PlaceholderValue.emptyText();
                 };
             }
             return PlaceholderValue.emptyText();
         }
     }
-    //endregion
 
     //region Functions
     static class EvaluationContext {
         /// Boolean
 
         static Boolean evalCondition(List<PlaceholderValue> args) {
-            if(args.isEmpty()) {
+            if (args.isEmpty()) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 1 argument, got " + args.size()
                 );
-            };
+            }
             return args.getFirst().toBoolean();
         }
 
         static Boolean evalEqualsIgnoreCase(List<PlaceholderValue> args) {
-            if(args.size() != 2) {
+            if (args.size() != 2) {
                 throw new PlaceholderEvaluationException(
                         "expects 2 arguments, got " + args.size()
                 );
@@ -2336,46 +2622,46 @@ public class PlaceholderRegistry {
         }
 
         static PlaceholderValue evalConditionIf(List<PlaceholderValue> args) {
-            if(args.size() < 2) {
+            if (args.size() < 2) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 2 arguments, got " + args.size()
                 );
-            };
+            }
             return args.getFirst().toBoolean()
                     ? args.get(1)
                     : (args.size() >= 3 ? args.get(2) : PlaceholderValue.emptyText());
         }
 
         static Boolean evalOr(List<PlaceholderValue> args) {
-            if(args.isEmpty()) {
+            if (args.isEmpty()) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 1 argument, got " + args.size()
                 );
-            };
+            }
             for (PlaceholderValue arg : args) {
-                if(arg.toBoolean()) return true;
+                if (arg.toBoolean()) return true;
             }
             return false;
         }
 
         static Boolean evalAnd(List<PlaceholderValue> args) {
-            if(args.isEmpty()) {
+            if (args.isEmpty()) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 1 argument, got " + args.size()
                 );
-            };
+            }
             for (PlaceholderValue arg : args) {
-                if(!arg.toBoolean()) return false;
+                if (!arg.toBoolean()) return false;
             }
             return true;
         }
 
         static Boolean evalXor(List<PlaceholderValue> args) {
-            if(args.isEmpty()) {
+            if (args.isEmpty()) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 1 argument, got " + args.size()
                 );
-            };
+            }
             boolean result = false;
             for (PlaceholderValue arg : args) {
                 result ^= arg.toBoolean();
@@ -2384,7 +2670,7 @@ public class PlaceholderRegistry {
         }
 
         static Boolean evalNot(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
@@ -2394,7 +2680,7 @@ public class PlaceholderRegistry {
         }
 
         static Boolean evalIsBlank(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
@@ -2403,12 +2689,12 @@ public class PlaceholderRegistry {
         }
 
         static Boolean evalContains(List<PlaceholderValue> args) {
-            if(args.size() < 2) {
+            if (args.size() < 2) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 2 arguments, got " + args.size()
                 );
-            };
-            if(args.size() > 2 && args.get(2).toBoolean()) {
+            }
+            if (args.size() > 2 && args.get(2).toBoolean()) {
                 return args.getFirst().toString().toLowerCase(Locale.US).contains(args.get(1).toString().toLowerCase(Locale.US));
             } else {
                 return args.getFirst().toString().contains(args.get(1).toString());
@@ -2416,12 +2702,12 @@ public class PlaceholderRegistry {
         }
 
         static Boolean evalEndsWith(List<PlaceholderValue> args) {
-            if(args.size() < 2) {
+            if (args.size() < 2) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 2 arguments, got " + args.size()
                 );
-            };
-            if(args.size() > 2 && args.get(2).toBoolean()) {
+            }
+            if (args.size() > 2 && args.get(2).toBoolean()) {
                 return args.getFirst().toString().toLowerCase(Locale.US).endsWith(args.get(1).toString().toLowerCase(Locale.US));
             } else {
                 return args.getFirst().toString().endsWith(args.get(1).toString());
@@ -2429,12 +2715,12 @@ public class PlaceholderRegistry {
         }
 
         static Boolean evalStartsWith(List<PlaceholderValue> args) {
-            if(args.size() < 2) {
+            if (args.size() < 2) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 2 arguments, got " + args.size()
                 );
-            };
-            if(args.size() > 2 && args.get(2).toBoolean()) {
+            }
+            if (args.size() > 2 && args.get(2).toBoolean()) {
                 return args.getFirst().toString().toLowerCase(Locale.US).startsWith(args.get(1).toString().toLowerCase(Locale.US));
             } else {
                 return args.getFirst().toString().startsWith(args.get(1).toString());
@@ -2442,7 +2728,7 @@ public class PlaceholderRegistry {
         }
 
         static Boolean evalIsInfinite(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
@@ -2451,7 +2737,7 @@ public class PlaceholderRegistry {
         }
 
         static Boolean evalIsNaN(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
@@ -2460,7 +2746,7 @@ public class PlaceholderRegistry {
         }
 
         static Boolean evalIsNumber(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
@@ -2469,7 +2755,7 @@ public class PlaceholderRegistry {
         }
 
         static Boolean evalIsString(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
@@ -2478,7 +2764,7 @@ public class PlaceholderRegistry {
         }
 
         static Boolean evalIsComponent(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
@@ -2487,7 +2773,7 @@ public class PlaceholderRegistry {
         }
 
         static Boolean evalIsBoolean(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
@@ -2496,7 +2782,7 @@ public class PlaceholderRegistry {
         }
 
         static Boolean evalBetween(List<PlaceholderValue> args) {
-            if(args.size() != 3) {
+            if (args.size() != 3) {
                 throw new PlaceholderEvaluationException(
                         "expects 3 arguments, got " + args.size()
                 );
@@ -2505,7 +2791,7 @@ public class PlaceholderRegistry {
         }
 
         static Boolean evalOneOf(List<PlaceholderValue> args) {
-            if(args.size() < 2) {
+            if (args.size() < 2) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 2 arguments, got " + args.size()
                 );
@@ -2517,7 +2803,7 @@ public class PlaceholderRegistry {
             List<PlaceholderValue> candidates = args.subList(1, args.size());
 
             for (PlaceholderValue arg : candidates) {
-                if(value.equals(arg.toString())) oneOf = true;
+                if (value.equals(arg.toString())) oneOf = true;
             }
 
             return oneOf;
@@ -2530,11 +2816,11 @@ public class PlaceholderRegistry {
         }
 
         static Number evalMax(List<PlaceholderValue> args) {
-            if(args.isEmpty()) {
+            if (args.isEmpty()) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 1 argument, got " + args.size()
                 );
-            };
+            }
             double result = Double.NEGATIVE_INFINITY;
             for (PlaceholderValue arg : args) {
                 result = Math.max(result, arg.toDouble());
@@ -2543,11 +2829,11 @@ public class PlaceholderRegistry {
         }
 
         static Number evalMin(List<PlaceholderValue> args) {
-            if(args.isEmpty()) {
+            if (args.isEmpty()) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 1 argument, got " + args.size()
                 );
-            };
+            }
             double result = Double.POSITIVE_INFINITY;
             for (PlaceholderValue arg : args) {
                 result = Math.min(result, arg.toDouble());
@@ -2556,11 +2842,11 @@ public class PlaceholderRegistry {
         }
 
         static Number evalSum(List<PlaceholderValue> args) {
-            if(args.isEmpty()) {
+            if (args.isEmpty()) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 1 argument, got " + args.size()
                 );
-            };
+            }
             double result = 0;
             for (PlaceholderValue arg : args) {
                 result += arg.toDouble();
@@ -2569,11 +2855,11 @@ public class PlaceholderRegistry {
         }
 
         static Number evalAverage(List<PlaceholderValue> args) {
-            if(args.isEmpty()) {
+            if (args.isEmpty()) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 1 argument, got " + args.size()
                 );
-            };
+            }
             double result = 0;
             for (PlaceholderValue arg : args) {
                 result += arg.toDouble();
@@ -2582,7 +2868,7 @@ public class PlaceholderRegistry {
         }
 
         static Number evalAbs(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
@@ -2591,7 +2877,7 @@ public class PlaceholderRegistry {
         }
 
         static Number evalCeil(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
@@ -2600,7 +2886,7 @@ public class PlaceholderRegistry {
         }
 
         static Number evalFloor(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
@@ -2609,16 +2895,16 @@ public class PlaceholderRegistry {
         }
 
         static Number evalRound(List<PlaceholderValue> args) {
-            if(args.isEmpty()) {
+            if (args.isEmpty()) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 1 argument, got " + args.size()
                 );
             }
 
             int decimals = 0;
-            if(args.size() > 1) decimals = args.get(1).toInteger();
+            if (args.size() > 1) decimals = args.get(1).toInteger();
 
-            if(Double.isInfinite(args.getFirst().toDouble())) return args.getFirst().toDouble();
+            if (Double.isInfinite(args.getFirst().toDouble())) return args.getFirst().toDouble();
 
             BigDecimal bd = new BigDecimal(args.getFirst().toDouble());
             bd = bd.setScale(decimals, RoundingMode.HALF_UP);
@@ -2626,11 +2912,11 @@ public class PlaceholderRegistry {
         }
 
         static Number evalMod(List<PlaceholderValue> args) {
-            if(args.size() != 2) {
+            if (args.size() != 2) {
                 throw new PlaceholderEvaluationException(
                         "expects 2 arguments, got " + args.size()
                 );
-            };
+            }
             double a = args.getFirst().toDouble();
             double b = args.get(1).toDouble();
 
@@ -2638,11 +2924,11 @@ public class PlaceholderRegistry {
         }
 
         static Number evalClamp(List<PlaceholderValue> args) {
-            if(args.size() != 3) {
+            if (args.size() != 3) {
                 throw new PlaceholderEvaluationException(
                         "expects 3 arguments, got " + args.size()
                 );
-            };
+            }
 
             double value = args.getFirst().toDouble();
             double min = args.get(1).toDouble();
@@ -2652,20 +2938,20 @@ public class PlaceholderRegistry {
         }
 
         static Number evalLog(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
-            };
+            }
             return Math.log(args.getFirst().toDouble());
         }
 
         static Number evalPow(List<PlaceholderValue> args) {
-            if(args.size() != 2) {
+            if (args.size() != 2) {
                 throw new PlaceholderEvaluationException(
                         "expects 2 arguments, got " + args.size()
                 );
-            };
+            }
             double a = args.getFirst().toDouble();
             double b = args.get(1).toDouble();
 
@@ -2673,20 +2959,20 @@ public class PlaceholderRegistry {
         }
 
         static Number evalSqrt(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
-            };
+            }
             return Math.sqrt(args.getFirst().toDouble());
         }
 
         static Number evalDistance(List<PlaceholderValue> args) {
-            if(args.size() != 6) {
+            if (args.size() != 6) {
                 throw new PlaceholderEvaluationException(
                         "expects 6 arguments, got " + args.size()
                 );
-            };
+            }
             double x1 = args.getFirst().toDouble();
             double y1 = args.get(1).toDouble();
             double z1 = args.get(2).toDouble();
@@ -2702,41 +2988,42 @@ public class PlaceholderRegistry {
         }
 
         static Number evalRandom(List<PlaceholderValue> args) {
-            if(!args.isEmpty()) {
+            if (!args.isEmpty()) {
                 throw new PlaceholderEvaluationException(
                         "expects no arguments, got " + args.size()
                 );
-            };
+            }
             return Math.random();
         }
 
         static Number evalRandomRange(List<PlaceholderValue> args) {
-            if(args.size() != 2) {
+            if (args.size() != 2) {
                 throw new PlaceholderEvaluationException(
                         "expects 2 arguments, got " + args.size()
                 );
-            };
+            }
             return args.getFirst().toDouble() + Math.random() * (args.get(1).toDouble() - args.getFirst().toDouble());
         }
+
         /// String Manipulation
 
         static PlaceholderValue evalSubstring(List<PlaceholderValue> args) {
-            if(args.size() < 2) {
+            if (args.size() < 2) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 2 arguments, got " + args.size()
                 );
-            };
+            }
 
             PlaceholderValue value = args.getFirst();
             int length = value.toString().length();
             int start = args.get(1).toInteger();
 
             int end = length;
-            if(args.size() > 2) end = args.get(2).toInteger();
+            if (args.size() > 2) end = args.get(2).toInteger();
 
-            if(start < 0 || end < start || end > length) return PlaceholderValue.emptyText();
+            if (start < 0 || end < start || end > length) return PlaceholderValue.emptyText();
 
-            if(value.isComponent()) {
+            if (value.isComponent()) {
                 return PlaceholderValue.component(TextHelper.substring(value.toComponent(), start, end));
             } else {
                 return PlaceholderValue.text(value.toString().substring(start, end));
@@ -2744,15 +3031,15 @@ public class PlaceholderRegistry {
         }
 
         static Number evalIndexOf(List<PlaceholderValue> args) {
-            if(args.size() < 2) {
+            if (args.size() < 2) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 2 arguments, got " + args.size()
                 );
-            };
+            }
             String value = args.getFirst().toString();
             String valueToSearch = args.get(1).toString();
 
-            if(args.size() < 3) {
+            if (args.size() < 3) {
                 return value.indexOf(valueToSearch);
             } else {
                 int fromIndex = args.get(2).toInteger();
@@ -2761,15 +3048,15 @@ public class PlaceholderRegistry {
         }
 
         static Number evalLastIndexOf(List<PlaceholderValue> args) {
-            if(args.size() < 2) {
+            if (args.size() < 2) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 2 arguments, got " + args.size()
                 );
-            };
+            }
             String value = args.getFirst().toString();
             String valueToSearch = args.get(1).toString();
 
-            if(args.size() < 3) {
+            if (args.size() < 3) {
                 return value.lastIndexOf(valueToSearch);
             } else {
                 int fromIndex = args.get(2).toInteger();
@@ -2778,28 +3065,28 @@ public class PlaceholderRegistry {
         }
 
         static String evalCharAt(List<PlaceholderValue> args) {
-            if(args.size() != 2) {
+            if (args.size() != 2) {
                 throw new PlaceholderEvaluationException(
                         "expects 2 arguments, got " + args.size()
                 );
-            };
+            }
 
             return String.valueOf(args.getFirst().toString().charAt(args.get(1).toInteger()));
         }
 
         static PlaceholderValue evalRepeat(List<PlaceholderValue> args) {
-            if(args.size() != 2) {
+            if (args.size() != 2) {
                 throw new PlaceholderEvaluationException(
                         "expects 2 arguments, got " + args.size()
                 );
-            };
+            }
 
             PlaceholderValue value = args.getFirst();
 
             int count = args.get(1).toInteger();
-            if(count <= 0) return PlaceholderValue.emptyText();
+            if (count <= 0) return PlaceholderValue.emptyText();
 
-            if(value.isComponent()) {
+            if (value.isComponent()) {
                 MutableComponent repeatedComponent = Component.empty();
 
                 for (int i = 0; i < count; i++) {
@@ -2813,15 +3100,15 @@ public class PlaceholderRegistry {
         }
 
         static PlaceholderValue evalUppercase(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
-            };
+            }
 
             PlaceholderValue value = args.getFirst();
 
-            if(value.isComponent()) {
+            if (value.isComponent()) {
                 return PlaceholderValue.component(TextHelper.toUppercase(value.toComponent()));
             } else {
                 return PlaceholderValue.text(value.toString().toUpperCase(Locale.US));
@@ -2829,15 +3116,15 @@ public class PlaceholderRegistry {
         }
 
         static PlaceholderValue evalLowercase(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
-            };
+            }
 
             PlaceholderValue value = args.getFirst();
 
-            if(value.isComponent()) {
+            if (value.isComponent()) {
                 return PlaceholderValue.component(TextHelper.toLowercase(value.toComponent()));
             } else {
                 return PlaceholderValue.text(value.toString().toLowerCase(Locale.US));
@@ -2845,15 +3132,15 @@ public class PlaceholderRegistry {
         }
 
         static PlaceholderValue evalReplace(List<PlaceholderValue> args) {
-            if(args.size() != 3) {
+            if (args.size() != 3) {
                 throw new PlaceholderEvaluationException(
                         "expects 3 arguments, got " + args.size()
                 );
-            };
+            }
 
             PlaceholderValue value = args.getFirst();
 
-            if(value.isComponent()) {
+            if (value.isComponent()) {
                 return PlaceholderValue.component(TextHelper.replace(value.toComponent(), args.get(1).toString(), args.get(2).toString()));
             } else {
                 return PlaceholderValue.text(value.toString().replace(args.get(1).toString(), args.get(2).toString()));
@@ -2861,15 +3148,15 @@ public class PlaceholderRegistry {
         }
 
         static PlaceholderValue evalReplaceFirst(List<PlaceholderValue> args) {
-            if(args.size() != 3) {
+            if (args.size() != 3) {
                 throw new PlaceholderEvaluationException(
                         "expects 3 argument, got " + args.size()
                 );
-            };
+            }
 
             PlaceholderValue value = args.getFirst();
 
-            if(value.isComponent()) {
+            if (value.isComponent()) {
                 return PlaceholderValue.component(TextHelper.replaceFirst(value.toComponent(), args.get(1).toString(), args.get(2).toString()));
             } else {
                 return PlaceholderValue.text(value.toString().replaceFirst(args.get(1).toString(), args.get(2).toString()));
@@ -2877,15 +3164,15 @@ public class PlaceholderRegistry {
         }
 
         static PlaceholderValue evalReverse(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
-            };
+            }
 
             PlaceholderValue value = args.getFirst();
 
-            if(value.isComponent()) {
+            if (value.isComponent()) {
                 return PlaceholderValue.component(TextHelper.reverse(value.toComponent()));
             } else {
                 return PlaceholderValue.text(new StringBuilder(value.toString()).reverse().toString());
@@ -2893,16 +3180,16 @@ public class PlaceholderRegistry {
         }
 
         static MutableComponent evalJoin(List<PlaceholderValue> args) {
-            if(args.size() < 2) {
+            if (args.size() < 2) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 2 arguments, got " + args.size()
                 );
-            };
+            }
 
             MutableComponent result = Component.empty().append(args.get(1).toComponent());
             MutableComponent separator = args.getFirst().toComponent();
 
-            if(args.size() > 2) {
+            if (args.size() > 2) {
                 List<PlaceholderValue> values = args.subList(2, args.size());
 
                 for (PlaceholderValue arg : values) {
@@ -2914,11 +3201,11 @@ public class PlaceholderRegistry {
         }
 
         static Number evalCount(List<PlaceholderValue> args) {
-            if(args.size() != 2) {
+            if (args.size() != 2) {
                 throw new PlaceholderEvaluationException(
                         "expects 2 arguments, got " + args.size()
                 );
-            };
+            }
 
             String value = args.getFirst().toString();
 
@@ -2926,7 +3213,7 @@ public class PlaceholderRegistry {
         }
 
         static Number evalLength(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
@@ -2935,58 +3222,58 @@ public class PlaceholderRegistry {
         }
 
         static String evalShortenNumber(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
-            };
+            }
             Number number = args.getFirst().toDouble();
 
             return TextHelper.shortenNumber(number.floatValue(), 2);
         }
 
         static String evalRemoveFormat(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
-            };
+            }
             return args.getFirst().toString();
         }
 
         static String evalFormatTime(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
-            };
+            }
             return String.format(Locale.US, "%02d", args.getFirst().toInteger());
         }
 
         static MutableComponent evalFormatFancyBoolean(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
-            };
+            }
             return TextHelper.literal(args.getFirst().toBoolean(), true);
         }
 
         static PlaceholderValue evalTrim(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
-            };
+            }
             return PlaceholderValue.component(TextHelper.trim(args.getFirst().toComponent()));
         }
 
         static PlaceholderValue evalPadStart(List<PlaceholderValue> args) {
-            if(args.size() != 3) {
+            if (args.size() != 3) {
                 throw new PlaceholderEvaluationException(
                         "expects 3 arguments, got " + args.size()
                 );
-            };
+            }
 
             PlaceholderValue value = args.getFirst();
             int length = args.get(1).toInteger();
@@ -3004,11 +3291,11 @@ public class PlaceholderRegistry {
         }
 
         static PlaceholderValue evalPadEnd(List<PlaceholderValue> args) {
-            if(args.size() != 3) {
+            if (args.size() != 3) {
                 throw new PlaceholderEvaluationException(
                         "expects 3 arguments, got " + args.size()
                 );
-            };
+            }
 
             PlaceholderValue value = args.getFirst();
             int length = args.get(1).toInteger();
@@ -3026,13 +3313,13 @@ public class PlaceholderRegistry {
         }
 
         static PlaceholderValue evalTruncate(List<PlaceholderValue> args) {
-            if(args.size() < 2) {
+            if (args.size() < 2) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 2 arguments, got " + args.size()
                 );
-            };
+            }
 
-            if(args.get(1).toInteger() < args.getFirst().toString().length()) {
+            if (args.get(1).toInteger() < args.getFirst().toString().length()) {
                 MutableComponent truncatedText = TextHelper.substring(args.getFirst().toComponent(), 0, args.get(1).toInteger());
                 return args.size() > 2
                         ? PlaceholderValue.component(truncatedText.append(args.get(2).toComponent()))
@@ -3043,24 +3330,24 @@ public class PlaceholderRegistry {
         }
 
         static PlaceholderValue evalCapitalize(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
-            };
+            }
             return PlaceholderValue.component(TextHelper.capitalize(args.getFirst().toComponent()));
         }
 
         static PlaceholderValue evalConcat(List<PlaceholderValue> args) {
-            if(args.isEmpty()) {
+            if (args.isEmpty()) {
                 throw new PlaceholderEvaluationException(
                         "expects at least 1 argument, got " + args.size()
                 );
-            };
+            }
 
             MutableComponent result = Component.empty().append(args.getFirst().toComponent());
 
-            if(args.size() > 1) {
+            if (args.size() > 1) {
                 List<PlaceholderValue> values = args.subList(1, args.size());
                 for (PlaceholderValue arg : values) {
                     result.append(arg.toComponent());
@@ -3073,15 +3360,15 @@ public class PlaceholderRegistry {
         /// Misc
 
         static String evalTypeOf(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
-            };
+            }
 
             PlaceholderValue value = args.getFirst();
 
-            if(value.isComponent()) return "component";
+            if (value.isComponent()) return "component";
             else if (value.isString()) return "string";
             else if (value.isBoolean()) return "boolean";
             else if (value.isNumber()) return "number";
@@ -3089,282 +3376,13 @@ public class PlaceholderRegistry {
         }
 
         static PlaceholderValue evalHideLine(List<PlaceholderValue> args) {
-            if(args.size() != 1) {
+            if (args.size() != 1) {
                 throw new PlaceholderEvaluationException(
                         "expects 1 argument, got " + args.size()
                 );
-            };
+            }
             return args.getFirst().toBoolean() ? PlaceholderValue.emptyText().markFailure() : PlaceholderValue.emptyText();
         }
-    }
-    //endregion
-
-    //region JSON Schema
-    public static JsonObject toJsonSchema() {
-        JsonObject root = new JsonObject();
-
-        for (Map.Entry<String, PlaceholderTreeNode> entry : ROOTS.entrySet()) {
-            root.add(entry.getKey(), describeNode(entry.getKey(), entry.getValue()));
-        }
-
-        return root;
-    }
-
-    public static String toJsonSchemaString() {
-        Gson gson = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
-        return gson.toJson(toJsonSchema());
-    }
-
-    public static JsonObject toJsonPathList() {
-        JsonObject root = new JsonObject();
-
-        for (Map.Entry<String, PlaceholderTreeNode> entry : ROOTS.entrySet()) {
-            JsonArray paths = new JsonArray();
-            collectPaths(entry.getKey(), entry.getValue(), paths);
-            root.add(entry.getKey(), paths);
-        }
-
-        return root;
-    }
-
-    public static String toJsonPathListString() {
-        Gson gson = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
-        return gson.toJson(toJsonPathList());
-    }
-
-    public static void collectPaths(String path, PlaceholderTreeNode node, JsonArray out) {
-        if(node.getValueKind() != ValueKind.NONE) out.add(path);
-        if(node.getEvalKind() != EvalKind.NONE) out.add(path + ".()");
-
-        for (Map.Entry<String, PlaceholderTreeNode> child : node.getChildren().entrySet()) {
-            collectPaths(path + "." + child.getKey(), child.getValue(), out);
-        }
-
-        if(node.getIndexChild() != null) collectPaths(path + ".<index>", node.getIndexChild(), out);
-        if(node.getStringChild() != null) collectPaths(path + ".<string>", node.getStringChild(), out);
-        if(node.getStringArrayChild() != null) collectPaths(path + ".<string[]>", node.getStringArrayChild(), out);
-    }
-
-    private static JsonElement describeNode(String name, PlaceholderTreeNode node) {
-        boolean hasChildren = !node.getChildren().isEmpty()
-                || node.getIndexChild() != null
-                || node.getStringChild() != null
-                || node.getStringArrayChild() != null;
-        boolean hasOwnValue = node.getValueKind() != ValueKind.NONE;
-        boolean hasOwnFunction = node.getEvalKind() != EvalKind.NONE;
-
-        if(!hasChildren) {
-            if(hasOwnValue && hasOwnFunction) return selfDescriptor(name, node);
-            if(hasOwnValue) return describeValueLeaf(node);
-            if(hasOwnFunction) return describeFunctionLeaf(name, node);
-
-            return new JsonPrimitive("unknown");
-        }
-
-        JsonObject object = new JsonObject();
-        if(hasOwnValue && hasOwnFunction) {
-            object.add("$self", selfDescriptor(name, node));
-        } else if (hasOwnValue) {
-            object.add("$self", describeValueLeaf(node));
-        } else if (hasOwnFunction) {
-            object.add("$self", describeFunctionLeaf(name, node));
-        }
-
-        for (Map.Entry<String, PlaceholderTreeNode> child : node.getChildren().entrySet()) {
-            object.add(child.getKey(), describeNode(child.getKey(), child.getValue()));
-        }
-        if(node.getIndexChild() != null) {
-            object.add("<index>", describeNode("<index>", node.getIndexChild()));
-        }
-        if(node.getStringChild() != null) {
-            object.add("<string>", describeNode("<string>", node.getStringChild()));
-        }
-        if(node.getStringArrayChild() != null) {
-            object.add("<string[]>", describeNode("<string[]>", node.getStringArrayChild()));
-        }
-        return object;
-    }
-
-    private static JsonObject selfDescriptor(String name, PlaceholderTreeNode node) {
-        JsonObject self = new JsonObject();
-        self.add("value", describeValueLeaf(node));
-        self.add("function", describeFunctionLeaf(name, node));
-        return self;
-    }
-
-    private static JsonElement describeValueLeaf(PlaceholderTreeNode node) {
-        String tag = valueTag(node.getValueKind());
-
-        JsonObject obj = new JsonObject();
-        obj.addProperty("returns", tag);
-        if(node.getDescription() != null) {
-            obj.addProperty("description", node.getDescription());
-        }
-        if(node.allowsEmpty()) {
-            obj.addProperty("allow_empty", true);
-        }
-        return obj;
-    }
-
-    private static JsonObject describeFunctionLeaf(String name, PlaceholderTreeNode node) {
-        String returnTag = evalTag(node.getEvalKind());
-        List<Param> params = node.getParams();
-
-        JsonObject obj = new JsonObject();
-        if(params.isEmpty()) {
-            obj.addProperty("signature", name + ".(value): " + returnTag);
-            obj.addProperty("returns", returnTag);
-            if(node.getDescription() != null) {
-                obj.addProperty("description", node.getDescription());
-            }
-            if(node.allowsEmpty()) {
-                obj.addProperty("allow_empty", true);
-            }
-            return obj;
-        }
-
-        StringBuilder signature = new StringBuilder(name).append(".(");
-        JsonArray paramsArray = new JsonArray();
-        for (int i = 0; i < params.size(); i++) {
-            Param param = params.get(i);
-            if(i > 0) signature.append(", ");
-            if(param.variadic()) signature.append("...");
-            signature.append(param.name());
-            if(param.optional()) signature.append("?");
-            signature.append(": ").append(param.getType());
-
-            JsonObject paramObj = new JsonObject();
-            paramObj.addProperty("name", param.name());
-            paramObj.addProperty("type", param.getType());
-            if(param.optional()) paramObj.addProperty("optional", true);
-            if(param.variadic()) paramObj.addProperty("variadic", true);
-            paramsArray.add(paramObj);
-        }
-        signature.append("): ").append(returnTag);
-
-        obj.addProperty("signature", signature.toString());
-        obj.addProperty("returns", returnTag);
-        if(node.getDescription() != null) {
-            obj.addProperty("description", node.getDescription());
-        }
-        if(node.allowsEmpty()) {
-            obj.addProperty("allow_empty", true);
-        }
-        obj.add("params", paramsArray);
-        return obj;
-    }
-
-    private static String valueTag(ValueKind valueKind) {
-        return switch (valueKind) {
-            case NONE -> "none";
-            case STRING -> "string";
-            case COMPONENT -> "component";
-            case NUMBER -> "number";
-            case BOOLEAN -> "boolean";
-            case VALUE -> "dynamic";
-        };
-    }
-
-    private static String evalTag(EvalKind evalKind) {
-        return switch (evalKind) {
-            case NONE -> "none";
-            case STRING -> "string";
-            case COMPONENT -> "component";
-            case NUMBER -> "number";
-            case BOOLEAN -> "boolean";
-            case VALUE -> "dynamic";
-        };
-    }
-    //endregion
-
-    //region Helpers
-    private static MutableComponent getLoreValue(ItemStack itemStack, String indexString) {
-        Pair<Boolean, TagObject> item = ValidateItem.isServerItem(itemStack, false);
-        return item.value1() ? getLoreValue(item.value2(), indexString) : Component.empty();
-    }
-
-    private static MutableComponent getLoreValue(TagObject object, String indexString) {
-        try {
-            int index = Integer.parseInt(indexString);
-            List<Component> loreLines = object.getLore();
-
-            if(index >= 0 && index < loreLines.size()) {
-                return loreLines.get(index).copy();
-            }
-
-            return Component.empty();
-        } catch (NumberFormatException e) {
-            return Component.empty();
-        }
-    }
-
-    public static PlaceholderValue getNbtValue(ItemStack itemStack, List<String> indices) {
-        Pair<Boolean, TagObject> item = ValidateItem.isServerItem(itemStack, true);
-        return item.value1() ? getNbtValue(item.value2(), indices) : PlaceholderValue.emptyText();
-    }
-
-    public static PlaceholderValue getNbtValue(TagObject object, List<String> indices) {
-        if(object.contains(indices.getFirst())) {
-            Tag data = object.get(indices.getFirst());
-            return switch (data.getId()) {
-                case 1 -> PlaceholderValue.bool(object.getBoolean(indices.getFirst()));
-                case 2 -> PlaceholderValue.number(object.getShort(indices.getFirst()));
-                case 3 -> PlaceholderValue.number(object.getInt(indices.getFirst()));
-                case 4 -> PlaceholderValue.number(object.getLong(indices.getFirst()));
-                case 5 -> PlaceholderValue.number(object.getFloat(indices.getFirst()));
-                case 6 -> PlaceholderValue.number(object.getDouble(indices.getFirst()));
-                case 7 -> {
-                    if(indices.size() > 1) {
-                        try {
-                            int index = Integer.parseInt(indices.get(1));
-                            yield PlaceholderValue.number(object.getByteFromArray(indices.getFirst(), index));
-                        } catch (NumberFormatException e) {
-                            yield PlaceholderValue.emptyText();
-                        }
-                    }
-                    yield PlaceholderValue.emptyText();
-                }
-                case 8 -> PlaceholderValue.text(object.getString(indices.getFirst()));
-                case 9 -> {
-                    if(indices.size() > 2) {
-                        try {
-                            int index = Integer.parseInt(indices.get(1));
-                            yield getNbtValue(TagObject.of(object.getList(indices.getFirst()).getCompound(index).orElse(new CompoundTag())),
-                                    indices.subList(2, indices.size())
-                            );
-                        } catch (NumberFormatException e) {
-                            yield PlaceholderValue.emptyText();
-                        }
-                    }
-                    yield PlaceholderValue.emptyText();
-                }
-                case 10 -> getNbtValue(TagObject.of(object.getTag(indices.getFirst())), indices.subList(1, indices.size()));
-                case 11 -> {
-                    if(indices.size() > 1) {
-                        try {
-                            int index = Integer.parseInt(indices.get(1));
-                            yield PlaceholderValue.number(object.getIntFromArray(indices.getFirst(), index));
-                        } catch (NumberFormatException e) {
-                            yield PlaceholderValue.emptyText();
-                        }
-                    }
-                    yield PlaceholderValue.emptyText();
-                }
-                case 12 -> {
-                    if(indices.size() > 1) {
-                        try {
-                            int index = Integer.parseInt(indices.get(1));
-                            yield PlaceholderValue.number(object.getLongFromArray(indices.getFirst(), index));
-                        } catch (NumberFormatException e) {
-                            yield PlaceholderValue.emptyText();
-                        }
-                    }
-                    yield PlaceholderValue.emptyText();
-                }
-                default -> PlaceholderValue.emptyText();
-            };
-        }
-        return PlaceholderValue.emptyText();
     }
     //endregion
 }

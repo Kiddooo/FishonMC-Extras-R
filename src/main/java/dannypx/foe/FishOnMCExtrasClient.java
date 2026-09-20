@@ -129,6 +129,7 @@ public class FishOnMCExtrasClient implements ClientModInitializer {
             ScoreboardHandler.instance().init();
             CrewHandler.instance().init();
             XpHandler.instance().init();
+            LocationXpHandler.instance().init();
 
             DataFileHandler.instance().init();
             LoadingHandler.instance().init();
@@ -174,6 +175,9 @@ public class FishOnMCExtrasClient implements ClientModInitializer {
 
                 // Placeholder Engine
                 PlaceholderHandlerV2.instance().tick();
+
+                // Location XP Engine
+                LocationXpHandler.instance().tick();
 
             } else {
                 if(Configs.handlerConfig.loadingHandler.get()) LoadingHandler.instance().tick();

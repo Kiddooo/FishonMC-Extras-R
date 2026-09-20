@@ -119,6 +119,9 @@ public final class XpHandler extends Handler {
                         + " pet=" + getLastPet()
         );
 
+        LocationXpHandler.instance()
+                .onLocationXpAward(getLastLocation());
+
         // Let FOER's existing event/trigger system decide what
         // to do with the award, including updating custom trackers.
         EventHandler.instance().onXpGain();
