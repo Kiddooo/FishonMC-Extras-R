@@ -70,7 +70,7 @@ public class FishOnMCExtrasClient implements ClientModInitializer {
     }
 
     private void receiveGameMessage(Component message, boolean overlay) {
-        ChatHandler.instance().onReceiveMessage(message);
+        ChatHandler.instance().onReceiveMessage(message, overlay);
     }
 
     private Component modifyGameMessage(Component message, boolean over) {

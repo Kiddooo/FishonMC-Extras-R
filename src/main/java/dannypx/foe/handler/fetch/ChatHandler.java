@@ -56,9 +56,11 @@ public class ChatHandler extends Handler {
         });
     }
 
-    public void onReceiveMessage(Component component) {
+    public void onReceiveMessage(Component component, boolean overlay) {
         if(this.inBlackList(component)) return;
-        
+
+        XpHandler.instance().onGameMessage(component, overlay);
+
         this.checkPet(component);
         this.checkQuest(component);
         this.checkChatTrigger(component);

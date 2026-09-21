@@ -545,8 +545,8 @@ public final class LocationXpHandler extends Handler {
     }
 
     /**
-     * Update the estimated current balance when FOER's
-     * existing XP handler detects a new LOCATION XP award.
+     * Update the estimated current balance when FOER detects a new
+     * location XP award.
      *
      * Do not use this for the session XP tracker; that remains
      * the job of FOER's existing custom trackers.
@@ -566,11 +566,12 @@ public final class LocationXpHandler extends Handler {
 
         /*
          * Once the estimate reaches the next-level threshold,
-         * get the new level and XP requirement from the server.
+         * refresh the level and XP requirement immediately.
+         * Keep the cached progress available while that request
+         * runs so the location XP display does not disappear.
          */
         if (progress.currentXp >= progress.requiredXp) {
             progress.refreshAfter = 0;
-            ready = false;
             nextAttemptAt = 0;
         }
     }
@@ -619,7 +620,7 @@ public final class LocationXpHandler extends Handler {
             return;
         }
 
-        ready = false;
+        ready = progressByLocation.containsKey(location);
         finish(mc);
     }
 

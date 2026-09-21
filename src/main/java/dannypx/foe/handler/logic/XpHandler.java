@@ -30,8 +30,12 @@ public final class XpHandler extends Handler {
         return INSTANCE;
     }
 
-    private static final Pattern XP_PATTERN = Pattern.compile(
-            "^\\+([\\d,]+(?:\\.\\d+)?)([KMB]?)\\s*(LXP|XP)$",
+    private static final Pattern STYLED_XP_PATTERN = Pattern.compile(
+            "^\\+\\s*([\\d,]+(?:\\.\\d+)?)([KMB]?)\\s*(LXP|XP)$",
+            Pattern.CASE_INSENSITIVE
+    );
+    private static final Pattern PLAIN_XP_PATTERN = Pattern.compile(
+            "\\+\\s*([\\d,]+(?:\\.\\d+)?)([KMB]?)\\s*(LXP|XP)\\b",
             Pattern.CASE_INSENSITIVE
     );
 
@@ -77,7 +81,7 @@ public final class XpHandler extends Handler {
                     : style.getColor().getValue();
 
             if (colour != previousColour[0]) {
-                parseAward(
+                parseStyledAward(
                         fragmentText.toString(),
                         previousColour[0],
                         awards
@@ -93,12 +97,45 @@ public final class XpHandler extends Handler {
         }, Style.EMPTY);
 
         // Process the final accumulated fragment.
-        parseAward(
+        parseStyledAward(
                 fragmentText.toString(),
                 previousColour[0],
                 awards
         );
 
+        publishAwards(awards);
+    }
+
+    /**
+     * Parse XP awards from ordinary game messages. Overlay messages
+     * are ignored here because {@link #onOverlay(Component)} handles
+     * their styled XP types.
+     */
+    public void onGameMessage(Component message, boolean overlay) {
+        if (message == null || overlay) {
+            return;
+        }
+
+        Map<XpType, Long> awards =
+                new EnumMap<>(XpType.class);
+        Matcher matcher = PLAIN_XP_PATTERN.matcher(
+                message.getString()
+        );
+
+        while (matcher.find()) {
+            String unit = matcher.group(3)
+                    .toUpperCase(Locale.ROOT);
+            XpType type = "LXP".equals(unit)
+                    ? XpType.LOCATION
+                    : XpType.PLAYER;
+
+            putAward(matcher, type, awards);
+        }
+
+        publishAwards(awards);
+    }
+
+    private void publishAwards(Map<XpType, Long> awards) {
         if (awards.isEmpty()) {
             return;
         }
@@ -127,12 +164,12 @@ public final class XpHandler extends Handler {
         EventHandler.instance().onXpGain();
     }
 
-    private static void parseAward(
+    private static void parseStyledAward(
             String text,
             int colour,
             Map<XpType, Long> awards
     ) {
-        Matcher matcher = XP_PATTERN.matcher(text.trim());
+        Matcher matcher = STYLED_XP_PATTERN.matcher(text.trim());
 
         if (!matcher.matches()) {
             return;
@@ -158,7 +195,19 @@ public final class XpHandler extends Handler {
             };
         }
 
-        if (type == null || awards.containsKey(type)) {
+        if (type == null) {
+            return;
+        }
+
+        putAward(matcher, type, awards);
+    }
+
+    private static void putAward(
+            Matcher matcher,
+            XpType type,
+            Map<XpType, Long> awards
+    ) {
+        if (awards.containsKey(type)) {
             return;
         }
 
